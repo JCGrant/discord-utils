@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, path::PathBuf};
 
 use reqwest::{
     multipart::{Form, Part},
@@ -7,7 +7,7 @@ use reqwest::{
 
 pub async fn upload(images_folder: String, art_webhook_url: String, animation_webhook_url: String) {
     // Collect files
-    let files: Vec<(String, String)> = fs::read_dir(&images_folder)
+    let files: Vec<(PathBuf, String)> = fs::read_dir(&images_folder)
         .unwrap()
         .filter_map(|f| {
             let Ok(dir_entry) = f else {
@@ -18,12 +18,8 @@ pub async fn upload(images_folder: String, art_webhook_url: String, animation_we
             if !path.is_file() {
                 return None;
             }
-            // Check extension is valid
-            let extension = path.extension()?;
-            // convert to String
-            let path_str = path.to_str()?;
-            let extension_str = extension.to_str()?;
-            Some((path_str.to_string(), extension_str.to_string()))
+            let extension = path.extension()?.to_str()?.to_string();
+            Some((path, extension))
         })
         .collect();
 
@@ -63,37 +59,58 @@ pub async fn upload(images_folder: String, art_webhook_url: String, animation_we
         let num_attempts = 5;
         let mut uploaded = false;
         let mut attempt = 1;
-        while attempt <= num_attempts && !uploaded {
+        loop {
             let response = send_file(file_path, webhook_url).await;
-            uploaded = response.status().is_success();
-            if uploaded {
-                println!(
-                    "Uploaded ({} / {}): {:?}",
-                    index + 1,
-                    files.len(),
-                    file_path
-                );
-            } else {
-                println!(
-                    "Failed to upload ({} / {}) - attempt {} / {}: {:?}",
-                    index + 1,
-                    files.len(),
-                    attempt,
-                    num_attempts,
-                    file_path
-                );
-                println!("  Response: {:?}", response.text().await.unwrap());
+            if response.status().is_success() {
+                uploaded = true;
+                break;
             }
-
+            println!(
+                "Failed to upload ({} / {}) - attempt {} / {}: {}",
+                index + 1,
+                files.len(),
+                attempt,
+                num_attempts,
+                file_path.display()
+            );
+            println!("  Response: {:?}", response.text().await.unwrap());
+            if attempt == num_attempts {
+                break;
+            }
             tokio::time::sleep(tokio::time::Duration::from_secs(attempt)).await;
             attempt += 1;
+        }
+
+        if uploaded {
+            println!(
+                "Uploaded ({} / {}): {}",
+                index + 1,
+                files.len(),
+                file_path.display()
+            );
+            // Move the file to the "uploaded" folder
+            let uploaded_folder = format!("{}/uploaded", images_folder);
+            fs::create_dir_all(&uploaded_folder).unwrap();
+            let file_name = file_path.file_name().unwrap().to_str().unwrap();
+            let new_path = format!("{}/{}", uploaded_folder, file_name);
+            fs::rename(file_path, new_path).unwrap();
+        } else {
+            println!(
+                "File ({} / {}) could not be uploaded: {}",
+                index + 1,
+                files.len(),
+                file_path.display()
+            );
         }
     }
 }
 
-async fn send_file(filepath: &str, webhook_url: &str) -> Response {
+async fn send_file(filepath: &PathBuf, webhook_url: &str) -> Response {
     let file = fs::read(filepath).unwrap();
-    let form = Form::new().part("file", Part::bytes(file).file_name(filepath.to_string()));
+    let form = Form::new().part(
+        "file",
+        Part::bytes(file).file_name(filepath.file_name().unwrap().to_str().unwrap().to_string()),
+    );
     reqwest::Client::new()
         .post(webhook_url)
         .header("Expect", "application/json")
